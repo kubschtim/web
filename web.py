@@ -1,4 +1,3 @@
-from asyncio.windows_events import NULL
 import re
 import requests
 import webbrowser
@@ -28,19 +27,32 @@ for element in subpages:
     if (element.startswith("/") or element.startswith("https://www.autarc.energy/")) and not element.startswith("//"):
         liste.append(element)
 
+def build_url(element):
+    if element.startswith("https:"):
+        full_url = element
+    elif element.startswith("/"):
+        full_url = url + element 
+    return full_url
+
 count = 0
 for element in liste:
-    if element.startswith("https:"):
-        response_subpage = requests.get(element).text
-    elif element.startswith("/"):
-        response_subpage = requests.get(url + element).text
-    else:
+    full_url = build_url(element)
+    if full_url is None:
         continue
+    try:
+        request_subpage = requests.get(full_url).text
+    except Exception:
+        continue
+
+    
+    
+        
     #Count occurence of the word "Wärmepumpen" on a website
     #-----------------------------------    
-    reg = re.sub("<[^>]*>", " ", response_subpage)
+    reg = re.sub("<[^>]*>", " ", request_subpage)
     words = re.findall(r"\b\w+\b", reg)
     count = count + words.count("Wärmepumpen")
     
 #print(count)
 print(subpages)
+

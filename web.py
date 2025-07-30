@@ -27,6 +27,8 @@ for element in subpages:
     if (element.startswith("/") or element.startswith("https://www.autarc.energy/")) and not element.startswith("//"):
         liste.append(element)
 
+liste.append(url)
+
 def build_url(element):
     if element.startswith("https:"):
         full_url = element
@@ -53,6 +55,6 @@ for element in liste:
     words = re.findall(r"\b\w+\b", reg)
     count = count + words.count("Wärmepumpen")
     
-#print(count)
-print(subpages)
 
+print(subpages)
+print(count)

@@ -52,9 +52,9 @@ for element in liste:
     #Count occurence of the word "Wärmepumpen" on a website
     #-----------------------------------    
     reg = re.sub("<[^>]*>", " ", request_subpage)
-    words = re.findall(r"\b\w+\b", reg)
-    count = count + words.count("Wärmepumpen")
+    words = re.findall(r"\b\w+\b", reg.lower())
+    count = count + words.count("heizlastberechnung")
     
 
-print(subpages)
+#print(subpages)
 print(count)

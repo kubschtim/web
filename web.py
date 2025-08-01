@@ -36,6 +36,7 @@ def build_url(element):
         full_url = url + element 
     return full_url
 
+results = []
 count = 0
 for element in liste:
     full_url = build_url(element)
@@ -54,7 +55,9 @@ for element in liste:
     reg = re.sub("<[^>]*>", " ", request_subpage)
     words = re.findall(r"\b\w+\b", reg.lower())
     count = count + words.count("heizlastberechnung")
-    
+    results.append((full_url, words.count("heizlastberechnung")))  # URL und Anzahl speichern
 
+top_3 = sorted(results, key=lambda x: x[1], reverse=True)[:3]
+print(top_3)
 #print(subpages)
 print(count)

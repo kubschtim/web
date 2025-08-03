@@ -1,5 +1,6 @@
 import re
 import requests
+import concurrent.futures
 
 # Configuration
 BASE_URL = "https://www.autarc.energy"
@@ -7,9 +8,8 @@ SEARCH_WORD = "heizlastberechnung"
 MAX_RESULTS = 3
 
 def count_words_on_page(url, search_word):
-    """Zählt Wörter auf einer Seite"""
     try:
-        response = requests.get(url, timeout=10)
+        response = requests.get(url)
         response.raise_for_status()
         reg = re.sub("<[^>]*>", " ", response.text)
         words = re.findall(r"\b\w+\b", reg.lower())
@@ -18,14 +18,12 @@ def count_words_on_page(url, search_word):
         return 0
 
 def is_valid_link(link, base_url):
-    """Prüft ob Link gültig ist"""
     return (link.startswith("/") or 
             link.startswith(base_url) and 
             not link.startswith("//") and
             not link.endswith(('.css', '.js', '.png', '.jpg', '.gif', '.ico')))
 
 def build_url(element, base_url):
-    """Baut vollständige URL aus Element"""
     if element.startswith("https:"):
         return element
     elif element.startswith("/"):
@@ -47,18 +45,25 @@ for element in subpages:
 liste = list(set(liste))
 liste.append(BASE_URL)
 
-# Count words on sub pages
+# Count words on sub pages (parallel)
 results = []
 total_count = 0
 
-for element in liste:
-    full_url = build_url(element, BASE_URL)
-    if full_url is None:
-        continue
+with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+    # Collect all URL's
+    urls_to_check = []
+    for element in liste:
+        full_url = build_url(element, BASE_URL)
+        if full_url:
+            urls_to_check.append(full_url)
     
-    word_count = count_words_on_page(full_url, SEARCH_WORD)
-    results.append((full_url, word_count))
-    total_count += word_count
+    # Run parallel
+    word_counts = list(executor.map(lambda url: count_words_on_page(url, SEARCH_WORD), urls_to_check))
+    
+    # Connect results
+    for url, count in zip(urls_to_check, word_counts):
+        results.append((url, count))
+        total_count += count
 
 # Sort top 3 pages with most occurence
 top_3 = sorted(results, key=lambda x: x[1], reverse=True)[:MAX_RESULTS]

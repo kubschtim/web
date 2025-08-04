@@ -4,18 +4,26 @@ import concurrent.futures
 
 # Configuration
 BASE_URL = "https://www.autarc.energy"
-SEARCH_WORD = "heizlastberechnung"
 MAX_RESULTS = 3
 
-def count_words_on_page(url, search_word):
+# Ask user for search words
+search_input = input("Enter search words (separated by space): ")
+SEARCH_WORDS = search_input.split()
+
+def count_words_on_page(url, search_words):
     try:
         response = requests.get(url)
         response.raise_for_status()
         reg = re.sub("<[^>]*>", " ", response.text)
         words = re.findall(r"\b\w+\b", reg.lower())
-        return words.count(search_word.lower())
+        
+        # Count each search word
+        results = {}
+        for word in search_words:
+            results[word] = words.count(word.lower())
+        return results
     except Exception:
-        return 0
+        return {word: 0 for word in search_words}
 
 def is_valid_link(link, base_url):
     return (link.startswith("/") or 
@@ -47,7 +55,7 @@ liste.append(BASE_URL)
 
 # Count words on sub pages (parallel)
 results = []
-total_count = 0
+total_counts = {word: 0 for word in SEARCH_WORDS}
 
 with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
     # Collect all URL's
@@ -58,19 +66,23 @@ with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
             urls_to_check.append(full_url)
     
     # Run parallel
-    word_counts = list(executor.map(lambda url: count_words_on_page(url, SEARCH_WORD), urls_to_check))
+    word_counts = list(executor.map(lambda url: count_words_on_page(url, SEARCH_WORDS), urls_to_check))
     
     # Connect results
-    for url, count in zip(urls_to_check, word_counts):
-        results.append((url, count))
-        total_count += count
+    for url, counts in zip(urls_to_check, word_counts):
+        results.append((url, counts))
+        for word, count in counts.items():
+            total_counts[word] += count
 
-# Sort top 3 pages with most occurence
-top_3 = sorted(results, key=lambda x: x[1], reverse=True)[:MAX_RESULTS]
-
-# print solution
-print(f"Top {MAX_RESULTS} Seiten mit den meisten Vorkommen von '{SEARCH_WORD}':")
-for i, (url, count) in enumerate(top_3, 1):
-    print(f"{i}. {url}: {count} Vorkommen")
-
-print(f"\nGesamtanzahl '{SEARCH_WORD}' auf allen Seiten: {total_count}")
+# Sort top 3 pages with most occurence for each word
+for word in SEARCH_WORDS:
+    print(f"\nTop {MAX_RESULTS} pages with most occurrences of '{word}':")
+    
+    # Sort by this specific word
+    word_results = [(url, counts[word]) for url, counts in results]
+    top_3 = sorted(word_results, key=lambda x: x[1], reverse=True)[:MAX_RESULTS]
+    
+    for i, (url, count) in enumerate(top_3, 1):
+        print(f"{i}. {url}: {count} occurrences")
+    
+    print(f"Total occurrences of '{word}' on all pages: {total_counts[word]}")

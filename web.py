@@ -25,6 +25,40 @@ def count_words_on_page(url, search_words):
     except Exception:
         return {word: 0 for word in search_words}
 
+def extract_ceo_from_impressum(base_url):
+    """Extracts CEO information from imprint page"""
+    try:
+        impressum_url = base_url + "/impressum"
+        response = requests.get(impressum_url)
+        response.raise_for_status()
+        
+        # Look for CEO patterns in German
+        text = response.text.lower()
+        
+        # Common patterns for CEO in German
+        ceo_patterns = [
+            r'geschäftsführer[:\s]+([^<\n]+)',
+            r'ceo[:\s]+([^<\n]+)',
+            r'geschäftsführung[:\s]+([^<\n]+)',
+            r'vorstand[:\s]+([^<\n]+)',
+            r'geschäftsführer[:\s]*([^<\n]{3,50})',
+            r'ceo[:\s]*([^<\n]{3,50})'
+        ]
+        
+        for pattern in ceo_patterns:
+            match = re.search(pattern, text, re.IGNORECASE)
+            if match:
+                ceo_name = match.group(1).strip()
+                # Clean up the extracted text
+                ceo_name = re.sub(r'[^\w\s]', '', ceo_name).strip()
+                if len(ceo_name) > 2:  # Only return if we found something meaningful
+                    return ceo_name
+        
+        return "CEO not found"
+        
+    except Exception as e:
+        return f"Could not access imprint page: {str(e)}"
+
 def is_valid_link(link, base_url):
     return (link.startswith("/") or 
             link.startswith(base_url) and 
@@ -37,6 +71,11 @@ def build_url(element, base_url):
     elif element.startswith("/"):
         return base_url + element
     return None
+
+# Extract CEO information first
+print("=== CEO Information ===")
+ceo_info = extract_ceo_from_impressum(BASE_URL)
+print(f"CEO/Geschäftsführer: {ceo_info}")
 
 # Load main page 
 response = requests.get(BASE_URL).text

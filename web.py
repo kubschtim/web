@@ -1,10 +1,27 @@
 import re
 import requests
 import concurrent.futures
+import json
+from typing import Dict, List, Tuple
+import openai
+from dataclasses import dataclass
+import os
 
 # Configuration
 BASE_URL = "https://www.autarc.energy"
 MAX_RESULTS = 3
+
+# OpenAI Configuration (set your API key as environment variable)
+openai.api_key = os.getenv('OPENAI_API_KEY')
+
+@dataclass
+class PageAnalysis:
+    url: str
+    category: str
+    topics: List[str]
+    sentiment: str
+    key_phrases: List[str]
+    summary: str
 
 # Ask user for search words
 search_input = input("Enter search words (separated by space): ")
@@ -72,6 +89,101 @@ def build_url(element, base_url):
         return base_url + element
     return None
 
+def get_page_content(url: str) -> str:
+    """Extract clean text content from a webpage"""
+    try:
+        response = requests.get(url, timeout=10)
+        response.raise_for_status()
+        
+        # Remove HTML tags and clean up text
+        clean_text = re.sub("<[^>]*>", " ", response.text)
+        clean_text = re.sub(r'\s+', ' ', clean_text)  # Multiple spaces to single
+        clean_text = clean_text.strip()
+        
+        # Limit text length for API efficiency
+        return clean_text[:3000] if len(clean_text) > 3000 else clean_text
+    except Exception as e:
+        return f"Error loading content: {str(e)}"
+
+def analyze_content_with_ai(url: str, content: str) -> PageAnalysis:
+    """Analyze webpage content using OpenAI API"""
+    if not openai.api_key:
+        return PageAnalysis(
+            url=url,
+            category="No API Key",
+            topics=["API key not configured"],
+            sentiment="neutral",
+            key_phrases=["Configure OPENAI_API_KEY environment variable"],
+            summary="AI analysis unavailable - API key missing"
+        )
+    
+    try:
+        prompt = f"""
+Analyze this webpage content and provide a structured analysis:
+
+URL: {url}
+Content: {content[:2000]}...
+
+Please provide:
+1. Main category (e.g., "Technology", "About Us", "Products", "Services", "Contact", etc.)
+2. 3-5 key topics discussed
+3. Overall sentiment (positive/neutral/negative)
+4. 3-5 key phrases or important terms
+5. Brief summary (1-2 sentences)
+
+Format your response as JSON:
+{{
+    "category": "...",
+    "topics": ["...", "...", "..."],
+    "sentiment": "...",
+    "key_phrases": ["...", "...", "..."],
+    "summary": "..."
+}}
+"""
+
+        response = openai.chat.completions.create(
+            model="gpt-3.5-turbo",
+            messages=[
+                {"role": "system", "content": "You are an expert content analyst. Always respond with valid JSON."},
+                {"role": "user", "content": prompt}
+            ],
+            max_tokens=500,
+            temperature=0.3
+        )
+        
+        # Parse the JSON response
+        analysis_data = json.loads(response.choices[0].message.content)
+        
+        return PageAnalysis(
+            url=url,
+            category=analysis_data.get("category", "Unknown"),
+            topics=analysis_data.get("topics", []),
+            sentiment=analysis_data.get("sentiment", "neutral"),
+            key_phrases=analysis_data.get("key_phrases", []),
+            summary=analysis_data.get("summary", "No summary available")
+        )
+        
+    except Exception as e:
+        return PageAnalysis(
+            url=url,
+            category="Analysis Error",
+            topics=[f"Error: {str(e)}"],
+            sentiment="neutral",
+            key_phrases=["Analysis failed"],
+            summary=f"Could not analyze content: {str(e)}"
+        )
+
+def analyze_pages_parallel(urls: List[str]) -> List[PageAnalysis]:
+    """Analyze multiple pages in parallel"""
+    def analyze_single_page(url):
+        content = get_page_content(url)
+        return analyze_content_with_ai(url, content)
+    
+    with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
+        analyses = list(executor.map(analyze_single_page, urls))
+    
+    return analyses
+
 # Extract CEO information first
 print("=== CEO Information ===")
 ceo_info = extract_ceo_from_impressum(BASE_URL)
@@ -125,3 +237,64 @@ for word in SEARCH_WORDS:
         print(f"{i}. {url}: {count} occurrences")
     
     print(f"Total occurrences of '{word}' on all pages: {total_counts[word]}")
+
+# 🤖 AI-POWERED CONTENT ANALYSIS
+print("\n" + "="*60)
+print("🤖 AI-POWERED CONTENT ANALYSIS")
+print("="*60)
+
+# Get top pages for AI analysis (limit to avoid API costs)
+top_urls = urls_to_check[:8]  # Analyze top 8 pages
+print(f"Analyzing {len(top_urls)} pages with AI...")
+
+# Run AI analysis
+page_analyses = analyze_pages_parallel(top_urls)
+
+# Group by category
+categories = {}
+for analysis in page_analyses:
+    if analysis.category not in categories:
+        categories[analysis.category] = []
+    categories[analysis.category].append(analysis)
+
+# Display results by category
+print(f"\n📊 FOUND {len(categories)} CATEGORIES:")
+print("-" * 40)
+
+for category, pages in categories.items():
+    print(f"\n🏷️  {category.upper()} ({len(pages)} pages)")
+    print("─" * (len(category) + 15))
+    
+    for analysis in pages:
+        print(f"\n📄 {analysis.url}")
+        print(f"   😊 Sentiment: {analysis.sentiment}")
+        print(f"   🎯 Topics: {', '.join(analysis.topics[:3])}")
+        print(f"   🔑 Key phrases: {', '.join(analysis.key_phrases[:3])}")
+        print(f"   📝 Summary: {analysis.summary}")
+
+# Overall sentiment analysis
+sentiments = [a.sentiment for a in page_analyses]
+sentiment_counts = {s: sentiments.count(s) for s in set(sentiments)}
+
+print(f"\n📈 OVERALL WEBSITE SENTIMENT:")
+print("-" * 30)
+for sentiment, count in sentiment_counts.items():
+    percentage = (count / len(sentiments)) * 100
+    print(f"   {sentiment.title()}: {count} pages ({percentage:.1f}%)")
+
+# Most common topics across all pages
+all_topics = []
+for analysis in page_analyses:
+    all_topics.extend(analysis.topics)
+
+from collections import Counter
+topic_counts = Counter(all_topics)
+most_common_topics = topic_counts.most_common(5)
+
+print(f"\n🔥 TOP TOPICS ACROSS WEBSITE:")
+print("-" * 30)
+for topic, count in most_common_topics:
+    print(f"   {topic}: mentioned {count} times")
+
+print(f"\n✨ Analysis complete! Processed {len(page_analyses)} pages.")
+print("💡 Tip: Set OPENAI_API_KEY environment variable for full AI analysis")

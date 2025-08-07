@@ -6,10 +6,14 @@ from typing import Dict, List, Tuple
 import openai
 from dataclasses import dataclass
 import os
+from requests.exceptions import RequestException, Timeout
+import time
 
 # Configuration
 BASE_URL = "https://www.autarc.energy"
 MAX_RESULTS = 3
+REQUEST_TIMEOUT = 10  # seconds
+MAX_RETRIES = 3
 
 # OpenAI Configuration (set your API key as environment variable)
 openai.api_key = os.getenv('OPENAI_API_KEY')
@@ -28,19 +32,26 @@ search_input = input("Enter search words (separated by space): ")
 SEARCH_WORDS = search_input.split()
 
 def count_words_on_page(url, search_words):
-    try:
-        response = requests.get(url)
-        response.raise_for_status()
-        reg = re.sub("<[^>]*>", " ", response.text)
-        words = re.findall(r"\b\w+\b", reg.lower())
-        
-        # Count each search word
-        results = {}
-        for word in search_words:
-            results[word] = words.count(word.lower())
-        return results
-    except Exception:
-        return {word: 0 for word in search_words}
+    for attempt in range(MAX_RETRIES):
+        try:
+            response = requests.get(url, timeout=REQUEST_TIMEOUT)
+            response.raise_for_status()
+            reg = re.sub("<[^>]*>", " ", response.text)
+            words = re.findall(r"\b\w+\b", reg.lower())
+            
+            # Count each search word
+            results = {}
+            for word in search_words:
+                results[word] = words.count(word.lower())
+            return results
+        except Timeout:
+            print(f"⚠️  Timeout accessing {url}, attempt {attempt + 1}/{MAX_RETRIES}")
+            if attempt == MAX_RETRIES - 1:
+                return {word: 0 for word in search_words}
+            time.sleep(1)  # Wait before retry
+        except RequestException as e:
+            print(f"⚠️  Error accessing {url}: {str(e)}")
+            return {word: 0 for word in search_words}
 
 def extract_ceo_from_impressum(base_url):
     """Extracts CEO information from imprint page"""
@@ -92,7 +103,7 @@ def build_url(element, base_url):
 def get_page_content(url: str) -> str:
     """Extract clean text content from a webpage"""
     try:
-        response = requests.get(url, timeout=10)
+        response = requests.get(url, timeout=REQUEST_TIMEOUT)
         response.raise_for_status()
         
         # Remove HTML tags and clean up text

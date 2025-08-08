@@ -2,21 +2,76 @@ import re
 import requests
 import concurrent.futures
 import json
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Optional
 import openai
 from dataclasses import dataclass
 import os
 from requests.exceptions import RequestException, Timeout
 import time
+from tqdm import tqdm
+from datetime import datetime
+import json
+from pathlib import Path
+import argparse
+import asyncio
+import aiohttp
+from functools import lru_cache
+import hashlib
+
+# Parse command line arguments
+def parse_args():
+    parser = argparse.ArgumentParser(description="Website Content Analyzer with AI capabilities")
+    parser.add_argument("--url", default="https://www.autarc.energy",
+                      help="Base URL to analyze (default: https://www.autarc.energy)")
+    parser.add_argument("--words", type=str,
+                      help="Search words (comma-separated). If not provided, will prompt for input.")
+    parser.add_argument("--max-pages", type=int, default=8,
+                      help="Maximum number of pages to analyze with AI (default: 8)")
+    parser.add_argument("--timeout", type=int, default=10,
+                      help="Request timeout in seconds (default: 10)")
+    parser.add_argument("--no-ai", action="store_true",
+                      help="Disable AI analysis even if API key is present")
+    return parser.parse_args()
 
 # Configuration
-BASE_URL = "https://www.autarc.energy"
+args = parse_args()
+BASE_URL = args.url
 MAX_RESULTS = 3
-REQUEST_TIMEOUT = 10  # seconds
+REQUEST_TIMEOUT = args.timeout
 MAX_RETRIES = 3
+CACHE_DURATION = 3600  # 1 hour cache
 
-# OpenAI Configuration (set your API key as environment variable)
-openai.api_key = os.getenv('OPENAI_API_KEY')
+# Simple in-memory cache
+_cache = {}
+
+def get_cache_key(url: str) -> str:
+    """Generate cache key for URL"""
+    return hashlib.md5(url.encode()).hexdigest()
+
+def get_cached_content(url: str) -> Optional[str]:
+    """Get cached content if available and not expired"""
+    cache_key = get_cache_key(url)
+    if cache_key in _cache:
+        content, timestamp = _cache[cache_key]
+        if time.time() - timestamp < CACHE_DURATION:
+            return content
+    return None
+
+def cache_content(url: str, content: str):
+    """Cache content with timestamp"""
+    cache_key = get_cache_key(url)
+    _cache[cache_key] = (content, time.time())
+
+# OpenAI Configuration
+if not args.no_ai:
+    openai.api_key = os.getenv('OPENAI_API_KEY')
+
+# Get search words
+if args.words:
+    SEARCH_WORDS = args.words.split(",")
+else:
+    search_input = input("Enter search words (separated by space): ")
+    SEARCH_WORDS = search_input.split()
 
 @dataclass
 class PageAnalysis:
@@ -27,9 +82,28 @@ class PageAnalysis:
     key_phrases: List[str]
     summary: str
 
-# Ask user for search words
-search_input = input("Enter search words (separated by space): ")
-SEARCH_WORDS = search_input.split()
+async def fetch_url_async(session: aiohttp.ClientSession, url: str) -> str:
+    """Fetch URL content asynchronously"""
+    try:
+        async with session.get(url, timeout=aiohttp.ClientTimeout(total=REQUEST_TIMEOUT)) as response:
+            if response.status == 200:
+                content = await response.text()
+                # Clean the content
+                clean_text = re.sub("<[^>]*>", " ", content)
+                clean_text = re.sub(r'\s+', ' ', clean_text).strip()
+                clean_text = clean_text[:3000] if len(clean_text) > 3000 else clean_text
+                return clean_text
+            else:
+                return f"Error: HTTP {response.status}"
+    except Exception as e:
+        return f"Error: {str(e)}"
+
+async def fetch_multiple_urls_async(urls: List[str]) -> Dict[str, str]:
+    """Fetch multiple URLs concurrently"""
+    async with aiohttp.ClientSession() as session:
+        tasks = [fetch_url_async(session, url) for url in urls]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        return dict(zip(urls, results))
 
 def count_words_on_page(url, search_words):
     for attempt in range(MAX_RETRIES):
@@ -100,24 +174,60 @@ def build_url(element, base_url):
         return base_url + element
     return None
 
-def get_page_content(url: str) -> str:
-    """Extract clean text content from a webpage"""
-    try:
-        response = requests.get(url, timeout=REQUEST_TIMEOUT)
-        response.raise_for_status()
-        
-        # Remove HTML tags and clean up text
-        clean_text = re.sub("<[^>]*>", " ", response.text)
-        clean_text = re.sub(r'\s+', ' ', clean_text)  # Multiple spaces to single
-        clean_text = clean_text.strip()
-        
-        # Limit text length for API efficiency
-        return clean_text[:3000] if len(clean_text) > 3000 else clean_text
-    except Exception as e:
-        return f"Error loading content: {str(e)}"
+def get_page_content_optimized(url: str) -> str:
+    """Get page content with caching"""
+    # Check cache first
+    cached = get_cached_content(url)
+    if cached:
+        return cached
+    
+    # Fetch from network
+    for attempt in range(MAX_RETRIES):
+        try:
+            response = requests.get(url, timeout=REQUEST_TIMEOUT)
+            response.raise_for_status()
+            
+            # Clean and cache content
+            clean_text = re.sub("<[^>]*>", " ", response.text)
+            clean_text = re.sub(r'\s+', ' ', clean_text).strip()
+            clean_text = clean_text[:3000] if len(clean_text) > 3000 else clean_text
+            
+            cache_content(url, clean_text)
+            return clean_text
+            
+        except Timeout:
+            print(f"⚠️  Timeout accessing {url}, attempt {attempt + 1}/{MAX_RETRIES}")
+            if attempt == MAX_RETRIES - 1:
+                return f"Error: Timeout after {MAX_RETRIES} attempts"
+            time.sleep(1)
+        except RequestException as e:
+            return f"Error loading content: {str(e)}"
 
-def analyze_content_with_ai(url: str, content: str) -> PageAnalysis:
-    """Analyze webpage content using OpenAI API"""
+class RateLimiter:
+    """Simple rate limiter for API calls"""
+    def __init__(self, calls_per_minute: int = 60):
+        self.calls_per_minute = calls_per_minute
+        self.calls = []
+    
+    def wait_if_needed(self):
+        """Wait if rate limit would be exceeded"""
+        now = time.time()
+        # Remove calls older than 1 minute
+        self.calls = [call_time for call_time in self.calls if now - call_time < 60]
+        
+        if len(self.calls) >= self.calls_per_minute:
+            sleep_time = 60 - (now - self.calls[0])
+            if sleep_time > 0:
+                print(f"⏳ Rate limit reached, waiting {sleep_time:.1f} seconds...")
+                time.sleep(sleep_time)
+        
+        self.calls.append(now)
+
+# Global rate limiter for OpenAI API
+api_rate_limiter = RateLimiter(calls_per_minute=50)
+
+def analyze_content_with_ai_optimized(url: str, content: str) -> PageAnalysis:
+    """Analyze webpage content using OpenAI API with rate limiting"""
     if not openai.api_key:
         return PageAnalysis(
             url=url,
@@ -129,6 +239,9 @@ def analyze_content_with_ai(url: str, content: str) -> PageAnalysis:
         )
     
     try:
+        # Apply rate limiting
+        api_rate_limiter.wait_if_needed()
+        
         prompt = f"""
 Analyze this webpage content and provide a structured analysis:
 
@@ -184,16 +297,103 @@ Format your response as JSON:
             summary=f"Could not analyze content: {str(e)}"
         )
 
-def analyze_pages_parallel(urls: List[str]) -> List[PageAnalysis]:
-    """Analyze multiple pages in parallel"""
+def analyze_pages_parallel_optimized(urls: List[str]) -> List[PageAnalysis]:
+    """Analyze multiple pages in parallel with optimized batching"""
     def analyze_single_page(url):
-        content = get_page_content(url)
-        return analyze_content_with_ai(url, content)
+        content = get_page_content_optimized(url)
+        return analyze_content_with_ai_optimized(url, content)
     
-    with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
-        analyses = list(executor.map(analyze_single_page, urls))
+    # Process in smaller batches to avoid overwhelming the API
+    batch_size = 3
+    all_results = []
     
-    return analyses
+    for i in range(0, len(urls), batch_size):
+        batch_urls = urls[i:i + batch_size]
+        print(f"🔍 Processing batch {i//batch_size + 1}/{(len(urls) + batch_size - 1)//batch_size}")
+        
+        with concurrent.futures.ThreadPoolExecutor(max_workers=batch_size) as executor:
+            batch_results = list(executor.map(analyze_single_page, batch_urls))
+            all_results.extend(batch_results)
+        
+        # Small delay between batches
+        if i + batch_size < len(urls):
+            time.sleep(1)
+    
+    return all_results
+
+def export_results(page_analyses: List[PageAnalysis], word_counts: Dict[str, int]):
+    """Export analysis results to files"""
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    output_dir = Path("analysis_results")
+    output_dir.mkdir(exist_ok=True)
+    
+    # Export to JSON
+    json_results = {
+        "timestamp": timestamp,
+        "base_url": BASE_URL,
+        "word_counts": word_counts,
+        "page_analyses": [
+            {
+                "url": analysis.url,
+                "category": analysis.category,
+                "topics": analysis.topics,
+                "sentiment": analysis.sentiment,
+                "key_phrases": analysis.key_phrases,
+                "summary": analysis.summary
+            }
+            for analysis in page_analyses
+        ]
+    }
+    
+    json_file = output_dir / f"analysis_{timestamp}.json"
+    with open(json_file, "w", encoding="utf-8") as f:
+        json.dump(json_results, f, indent=2, ensure_ascii=False)
+    
+    # Export to HTML
+    html_content = f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Website Analysis Results</title>
+        <style>
+            body {{ font-family: Arial, sans-serif; margin: 2em; }}
+            .category {{ background: #f5f5f5; padding: 1em; margin: 1em 0; border-radius: 5px; }}
+            .page {{ margin: 1em 0; padding: 1em; border: 1px solid #ddd; border-radius: 5px; }}
+            .sentiment.positive {{ color: green; }}
+            .sentiment.negative {{ color: red; }}
+            .sentiment.neutral {{ color: gray; }}
+        </style>
+    </head>
+    <body>
+        <h1>Website Analysis Results</h1>
+        <p><strong>Base URL:</strong> {BASE_URL}</p>
+        <p><strong>Analysis Date:</strong> {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}</p>
+        
+        <h2>Word Counts</h2>
+        <ul>
+        {"".join(f"<li><strong>{word}:</strong> {count}</li>" for word, count in word_counts.items())}
+        </ul>
+        
+        <h2>Page Analyses</h2>
+        {"".join(f'''
+        <div class="page">
+            <h3><a href="{analysis.url}">{analysis.url}</a></h3>
+            <p><strong>Category:</strong> {analysis.category}</p>
+            <p><strong>Sentiment:</strong> <span class="sentiment {analysis.sentiment}">{analysis.sentiment}</span></p>
+            <p><strong>Topics:</strong> {", ".join(analysis.topics)}</p>
+            <p><strong>Key Phrases:</strong> {", ".join(analysis.key_phrases)}</p>
+            <p><strong>Summary:</strong> {analysis.summary}</p>
+        </div>
+        ''' for analysis in page_analyses)}
+    </body>
+    </html>
+    """
+    
+    html_file = output_dir / f"analysis_{timestamp}.html"
+    with open(html_file, "w", encoding="utf-8") as f:
+        f.write(html_content)
+    
+    return json_file, html_file
 
 # Extract CEO information first
 print("=== CEO Information ===")
@@ -250,16 +450,17 @@ for word in SEARCH_WORDS:
     print(f"Total occurrences of '{word}' on all pages: {total_counts[word]}")
 
 # 🤖 AI-POWERED CONTENT ANALYSIS
-print("\n" + "="*60)
-print("🤖 AI-POWERED CONTENT ANALYSIS")
-print("="*60)
-
-# Get top pages for AI analysis (limit to avoid API costs)
-top_urls = urls_to_check[:8]  # Analyze top 8 pages
-print(f"Analyzing {len(top_urls)} pages with AI...")
-
-# Run AI analysis
-page_analyses = analyze_pages_parallel(top_urls)
+if not args.no_ai and openai.api_key:
+    print("\n" + "="*60)
+    print("🤖 AI-POWERED CONTENT ANALYSIS")
+    print("="*60)
+    
+    # Get top pages for AI analysis (limit to avoid API costs)
+    top_urls = urls_to_check[:args.max_pages]
+    print(f"Analyzing {len(top_urls)} pages with AI...")
+    
+    # Run AI analysis
+    page_analyses = analyze_pages_parallel_optimized(top_urls)
 
 # Group by category
 categories = {}
@@ -309,3 +510,10 @@ for topic, count in most_common_topics:
 
 print(f"\n✨ Analysis complete! Processed {len(page_analyses)} pages.")
 print("💡 Tip: Set OPENAI_API_KEY environment variable for full AI analysis")
+
+if page_analyses:
+    print("\n📊 Exporting Results...")
+    json_file, html_file = export_results(page_analyses, total_counts)
+    print(f"✅ Results exported to:")
+    print(f"   📄 JSON: {json_file}")
+    print(f"   🌐 HTML: {html_file}")

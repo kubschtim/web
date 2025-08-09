@@ -81,6 +81,8 @@ class PageAnalysis:
     sentiment: str
     key_phrases: List[str]
     summary: str
+    installer_type: str
+    installer_confidence: float
 
 async def fetch_url_async(session: aiohttp.ClientSession, url: str) -> str:
     """Fetch URL content asynchronously"""
@@ -228,14 +230,17 @@ api_rate_limiter = RateLimiter(calls_per_minute=50)
 
 def analyze_content_with_ai_optimized(url: str, content: str) -> PageAnalysis:
     """Analyze webpage content using OpenAI API with rate limiting"""
-    if not openai.api_key:
+    if args.no_ai or not openai.api_key:
+        installer_type, installer_confidence = _classify_installer_from_text(content)
         return PageAnalysis(
             url=url,
-            category="No API Key",
-            topics=["API key not configured"],
+            category="Heuristic",
+            topics=[],
             sentiment="neutral",
-            key_phrases=["Configure OPENAI_API_KEY environment variable"],
-            summary="AI analysis unavailable - API key missing"
+            key_phrases=[],
+            summary="Heuristic classification only (no AI).",
+            installer_type=installer_type,
+            installer_confidence=installer_confidence
         )
     
     try:
@@ -278,23 +283,29 @@ Format your response as JSON:
         # Parse the JSON response
         analysis_data = json.loads(response.choices[0].message.content)
         
+        installer_type, installer_confidence = _classify_installer_from_text(content)
         return PageAnalysis(
             url=url,
             category=analysis_data.get("category", "Unknown"),
             topics=analysis_data.get("topics", []),
             sentiment=analysis_data.get("sentiment", "neutral"),
             key_phrases=analysis_data.get("key_phrases", []),
-            summary=analysis_data.get("summary", "No summary available")
+            summary=analysis_data.get("summary", "No summary available"),
+            installer_type=installer_type,
+            installer_confidence=installer_confidence
         )
         
     except Exception as e:
+        installer_type, installer_confidence = _classify_installer_from_text(content)
         return PageAnalysis(
             url=url,
             category="Analysis Error",
             topics=[f"Error: {str(e)}"],
             sentiment="neutral",
             key_phrases=["Analysis failed"],
-            summary=f"Could not analyze content: {str(e)}"
+            summary=f"Could not analyze content: {str(e)}",
+            installer_type=installer_type,
+            installer_confidence=installer_confidence
         )
 
 def analyze_pages_parallel_optimized(urls: List[str]) -> List[PageAnalysis]:
@@ -339,7 +350,9 @@ def export_results(page_analyses: List[PageAnalysis], word_counts: Dict[str, int
                 "topics": analysis.topics,
                 "sentiment": analysis.sentiment,
                 "key_phrases": analysis.key_phrases,
-                "summary": analysis.summary
+                "summary": analysis.summary,
+                "installer_type": analysis.installer_type,
+                "installer_confidence": analysis.installer_confidence
             }
             for analysis in page_analyses
         ]
@@ -383,6 +396,7 @@ def export_results(page_analyses: List[PageAnalysis], word_counts: Dict[str, int
             <p><strong>Topics:</strong> {", ".join(analysis.topics)}</p>
             <p><strong>Key Phrases:</strong> {", ".join(analysis.key_phrases)}</p>
             <p><strong>Summary:</strong> {analysis.summary}</p>
+            <p><strong>Installer Type:</strong> {analysis.installer_type} ({analysis.installer_confidence:.2f})</p>
         </div>
         ''' for analysis in page_analyses)}
     </body>
@@ -394,6 +408,44 @@ def export_results(page_analyses: List[PageAnalysis], word_counts: Dict[str, int
         f.write(html_content)
     
     return json_file, html_file
+
+def _classify_installer_from_text(text: str) -> Tuple[str, float]:
+    """Heuristically classify installer type from text.
+    Returns (installer_type, confidence). installer_type in {"pv", "heatpump", "both", "unknown"}.
+    """
+    text_l = text.lower()
+    pv_keywords = [
+        "photovoltaik", "photovoltaik", "pv-anlage", "pv anlage", "solaranlage",
+        "solarpanel", "solarmodul", "solarstrom", "pv", "solar", "wechselrichter",
+        "strings", "modulmontage", "einspeisung", "speicher", "stromspeicher"
+    ]
+    hp_keywords = [
+        "wärmepumpe", "waermepumpe", "wärmepumpen", "heat pump", "heizungsbauer",
+        "heizlast", "monoblock", "splitgerät", "wärmequelle", "hydraulischer abgleich",
+        "wp", "kältemittel", "enthalpie"
+    ]
+
+    pv_hits = sum(1 for k in pv_keywords if k in text_l)
+    hp_hits = sum(1 for k in hp_keywords if k in text_l)
+
+    if pv_hits == 0 and hp_hits == 0:
+        return ("unknown", 0.0)
+
+    if pv_hits > 0 and hp_hits == 0:
+        # confidence scaled by hits up to 0.95
+        return ("pv", min(0.5 + 0.05 * pv_hits, 0.95))
+    if hp_hits > 0 and pv_hits == 0:
+        return ("heatpump", min(0.5 + 0.05 * hp_hits, 0.95))
+
+    # both present
+    dominance = abs(pv_hits - hp_hits)
+    base_conf = 0.6 + 0.04 * dominance
+    base_conf = min(base_conf, 0.9)
+    if pv_hits > hp_hits:
+        return ("pv", base_conf)
+    if hp_hits > pv_hits:
+        return ("heatpump", base_conf)
+    return ("both", 0.65)
 
 # Extract CEO information first
 print("=== CEO Information ===")
@@ -461,6 +513,23 @@ if not args.no_ai and openai.api_key:
     
     # Run AI analysis
     page_analyses = analyze_pages_parallel_optimized(top_urls)
+else:
+    # Heuristic-only analysis when AI disabled or missing API key
+    top_urls = urls_to_check[:args.max_pages]
+    page_analyses = []
+    for u in top_urls:
+        content = get_page_content_optimized(u)
+        ins_type, ins_conf = _classify_installer_from_text(content)
+        page_analyses.append(PageAnalysis(
+            url=u,
+            category="Heuristic",
+            topics=[],
+            sentiment="neutral",
+            key_phrases=[],
+            summary="Heuristic classification only (no AI).",
+            installer_type=ins_type,
+            installer_confidence=ins_conf
+        ))
 
 # Group by category
 categories = {}
@@ -483,6 +552,7 @@ for category, pages in categories.items():
         print(f"   🎯 Topics: {', '.join(analysis.topics[:3])}")
         print(f"   🔑 Key phrases: {', '.join(analysis.key_phrases[:3])}")
         print(f"   📝 Summary: {analysis.summary}")
+        print(f"   🛠️ Installer: {analysis.installer_type} ({analysis.installer_confidence:.2f})")
 
 # Overall sentiment analysis
 sentiments = [a.sentiment for a in page_analyses]

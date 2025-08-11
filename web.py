@@ -136,26 +136,43 @@ def extract_ceo_from_impressum(base_url):
         response = requests.get(impressum_url)
         response.raise_for_status()
         
+        # First clean the HTML properly
+        from bs4 import BeautifulSoup
+        soup = BeautifulSoup(response.text, 'html.parser')
+        
+        # Remove script and style elements
+        for script in soup(["script", "style"]):
+            script.decompose()
+        
+        # Get clean text
+        text = soup.get_text()
+        
         # Look for CEO patterns in German
-        text = response.text.lower()
+        text_lower = text.lower()
         
         # Common patterns for CEO in German
         ceo_patterns = [
-            r'geschäftsführer[:\s]+([^<\n]+)',
-            r'ceo[:\s]+([^<\n]+)',
-            r'geschäftsführung[:\s]+([^<\n]+)',
-            r'vorstand[:\s]+([^<\n]+)',
-            r'geschäftsführer[:\s]*([^<\n]{3,50})',
-            r'ceo[:\s]*([^<\n]{3,50})'
+            r'geschäftsführer[:\s]+([^<\n\r]{3,50})',
+            r'ceo[:\s]+([^<\n\r]{3,50})',
+            r'geschäftsführung[:\s]+([^<\n\r]{3,50})',
+            r'vorstand[:\s]+([^<\n\r]{3,50})',
+            r'geschäftsführer[:\s]*([^<\n\r]{3,50})',
+            r'ceo[:\s]*([^<\n\r]{3,50})'
         ]
         
         for pattern in ceo_patterns:
-            match = re.search(pattern, text, re.IGNORECASE)
+            match = re.search(pattern, text_lower, re.IGNORECASE)
             if match:
                 ceo_name = match.group(1).strip()
-                # Clean up the extracted text
-                ceo_name = re.sub(r'[^\w\s]', '', ceo_name).strip()
-                if len(ceo_name) > 2:  # Only return if we found something meaningful
+                # Clean up the extracted text - remove special characters but keep spaces
+                ceo_name = re.sub(r'[^\w\säöüßÄÖÜ]', '', ceo_name).strip()
+                
+                # Additional validation: check if it looks like a real name
+                if (len(ceo_name) > 2 and 
+                    len(ceo_name) < 50 and
+                    not any(char.isdigit() for char in ceo_name) and
+                    not any(word in ceo_name.lower() for word in ['script', 'function', 'document', 'window', 'class', 'id', 'href', 'src']) and
+                    ' ' in ceo_name):  # Should contain at least one space for first/last name
                     return ceo_name
         
         return "CEO not found"
@@ -579,7 +596,8 @@ for topic, count in most_common_topics:
     print(f"   {topic}: mentioned {count} times")
 
 print(f"\n✨ Analysis complete! Processed {len(page_analyses)} pages.")
-print("💡 Tip: Set OPENAI_API_KEY environment variable for full AI analysis")
+if not openai.api_key:
+    print("💡 Tip: Set OPENAI_API_KEY environment variable for full AI analysis")
 
 if page_analyses:
     print("\n📊 Exporting Results...")

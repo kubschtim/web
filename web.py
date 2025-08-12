@@ -21,8 +21,8 @@ import hashlib
 # Parse command line arguments
 def parse_args():
     parser = argparse.ArgumentParser(description="Website Content Analyzer with AI capabilities")
-    parser.add_argument("--url", default="https://www.autarc.energy",
-                      help="Base URL to analyze (default: https://www.autarc.energy)")
+    parser.add_argument("--url",
+                      help="Base URL to analyze (e.g., https://example.com)")
     parser.add_argument("--words", type=str,
                       help="Search words (comma-separated). If not provided, will prompt for input.")
     parser.add_argument("--max-pages", type=int, default=8,
@@ -35,7 +35,17 @@ def parse_args():
 
 # Configuration
 args = parse_args()
-BASE_URL = args.url
+
+# Ask for URL every run if not provided via --url
+if args.url:
+    BASE_URL = args.url.strip()
+else:
+    BASE_URL = input("Enter base URL (e.g., https://example.com): ").strip()
+
+# Ensure scheme
+if not BASE_URL.startswith(("http://", "https://")):
+    BASE_URL = "https://" + BASE_URL
+
 MAX_RESULTS = 3
 REQUEST_TIMEOUT = args.timeout
 MAX_RETRIES = 3

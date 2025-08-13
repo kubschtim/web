@@ -587,3 +587,11 @@ if page_analyses:
     print(f"✅ Results exported to:")
     print(f"   📄 JSON: {json_file}")
     print(f"   🌐 HTML: {html_file}")
+    # Add after lead scoring
+    print(f"\n�� SUMMARY STATISTICS")
+    print("=" * 30)
+    print(f"   Total pages analyzed: {len(page_analyses)}")
+    print(f"   Pages with PV content: {sum(1 for a in page_analyses if a.installer_type == 'pv')}")
+    print(f"   Pages with heat pump content: {sum(1 for a in page_analyses if a.installer_type == 'heatpump')}")
+    print(f"   Pages with both: {sum(1 for a in page_analyses if a.installer_type == 'both')}")
+    print(f"   Average installer confidence: {sum(a.installer_confidence for a in page_analyses) / len(page_analyses):.2f}")

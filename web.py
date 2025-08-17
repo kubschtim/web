@@ -479,11 +479,19 @@ print("=== CEO Information ===")
 ceo_info = extract_ceo_from_impressum(BASE_URL)
 print(f"CEO/Geschäftsführer: {ceo_info}")
 
-# Load main page 
-response = requests.get(BASE_URL).text
+# Load main page with error handling
+try:
+    response = requests.get(BASE_URL, timeout=REQUEST_TIMEOUT)
+    response.raise_for_status()
+    response_text = response.text
+    print(f"✅ Successfully loaded main page: {BASE_URL}")
+except requests.exceptions.RequestException as e:
+    print(f"❌ Error loading main page {BASE_URL}: {str(e)}")
+    print("Please check if the URL is correct and the website is accessible.")
+    exit(1)
 
 # Extract & filter Links
-subpages = re.findall('href="([^"]+)"', response)
+subpages = re.findall('href="([^"]+)"', response_text)
 liste = []
 
 for element in subpages:

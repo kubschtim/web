@@ -140,61 +140,211 @@ def count_words_on_page(url, search_words):
             return {word: 0 for word in search_words}
 
 def extract_ceo_from_impressum(base_url):
-    """Extracts CEO information from imprint page"""
-    try:
-        impressum_url = base_url + "/impressum"
-        response = requests.get(impressum_url)
-        response.raise_for_status()
-        
-        # First clean the HTML properly
-        from bs4 import BeautifulSoup
-        soup = BeautifulSoup(response.text, 'html.parser')
-        
-        # Remove script and style elements
-        for script in soup(["script", "style"]):
-            script.decompose()
-        
-        # Get clean text
-        text = soup.get_text()
-        
-        # Look for CEO patterns in German
-        text_lower = text.lower()
-        
-        # Common patterns for CEO in German
-        ceo_patterns = [
-            r'geschäftsführer[:\s]+([^<\n\r]{3,50})',
-            r'ceo[:\s]+([^<\n\r]{3,50})',
-            r'geschäftsführung[:\s]+([^<\n\r]{3,50})',
-            r'vorstand[:\s]+([^<\n\r]{3,50})',
-            r'geschäftsführer[:\s]*([^<\n\r]{3,50})',
-            r'ceo[:\s]*([^<\n\r]{3,50})'
-        ]
-        
-        for pattern in ceo_patterns:
-            match = re.search(pattern, text_lower, re.IGNORECASE)
-            if match:
-                ceo_name = match.group(1).strip()
-                # Clean up the extracted text - remove special characters but keep spaces
-                ceo_name = re.sub(r'[^\w\säöüßÄÖÜ]', '', ceo_name).strip()
-                
-                # Additional validation: check if it looks like a real name
-                if (len(ceo_name) > 2 and 
-                    len(ceo_name) < 50 and
-                    not any(char.isdigit() for char in ceo_name) and
-                    not any(word in ceo_name.lower() for word in ['script', 'function', 'document', 'window', 'class', 'id', 'href', 'src']) and
-                    ' ' in ceo_name):  # Should contain at least one space for first/last name
-                    return ceo_name
-        
-        return "CEO not found"
-        
-    except Exception as e:
-        return f"Could not access imprint page: {str(e)}"
+    """Robustly extract CEO/Managing Director from imprint-like pages."""
+    import json
+    from urllib.parse import urljoin
+    
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15",
+        "Accept-Language": "de-DE,de;q=0.9,en;q=0.8"
+    }
+
+    def fetch(url):
+        try:
+            r = requests.get(url, headers=headers, timeout=REQUEST_TIMEOUT)
+            r.raise_for_status()
+            return r.text
+        except Exception:
+            return None
+
+    # 1) Candidate paths
+    candidate_paths = [
+        "/impressum", "/imprint", "/legal", "/legal-notice", "/rechtliches",
+        "/unternehmen/impressum", "/company/imprint", "/kontakt", "/contact",
+        "/impressum.html", "/impressum-und-datenschutz", "/impressum-datenschutz",
+    ]
+    candidates = [urljoin(base_url, p) for p in candidate_paths]
+
+    # 2) Discover imprint link on homepage by anchor text
+    home_html = fetch(base_url)
+    if home_html:
+        try:
+            from bs4 import BeautifulSoup
+            s = BeautifulSoup(home_html, "html.parser")
+            for a in s.find_all("a"):
+                txt = (a.get_text() or "").strip().lower()
+                if re.search(r"\b(impressum|imprint|legal|rechtlich|contact|kontakt|legal notice)\b", txt):
+                    href = a.get("href")
+                    if href:
+                        candidates.append(urljoin(base_url, href))
+        except Exception:
+            pass
+
+    # Deduplicate while preserving order
+    seen = set()
+    uniq_candidates = []
+    for u in candidates:
+        if u not in seen:
+            uniq_candidates.append(u); seen.add(u)
+
+    # Patterns to find management names
+    label_patterns = [
+        r"geschäftsführer(?:in|innen)?",
+        r"geschäftsführung",
+        r"vertret(?:en|ungs)berechtigt(?:e[rn]?)?",
+        r"managing director(?:s)?",
+        r"ceo",
+        r"vorstand",
+        r"inhaber",
+        r"founder(?:s)?",
+    ]
+    # Capture up to punctuation/newline after label
+    capture_after_label = re.compile(
+        r"(?:%s)[:\s]+\s*([^\n\r\|•·;:]{3,100})" % ("|".join(label_patterns)),
+        re.IGNORECASE
+    )
+
+    def clean_names(chunk):
+        # Split by common separators
+        parts = re.split(r"\s*(?:,| und | & |/|\|)\s*", chunk)
+        out = []
+        for p in parts:
+            p = re.sub(r"[^\w\säöüßÄÖÜ\-]", "", p).strip()
+            if not p: 
+                continue
+            if any(ch.isdigit() for ch in p): 
+                continue
+            # Heuristic: 2-4 tokens, mostly letters, allow hyphenated names
+            toks = [t for t in p.split() if t]
+            if 1 < len(toks) <= 4 and len(p) <= 60:
+                out.append(p)
+        return out
+
+    def jsonld_names(soup):
+        names = []
+        for tag in soup.find_all("script", type="application/ld+json"):
+            try:
+                data = json.loads(tag.string or "")
+            except Exception:
+                continue
+            def collect(obj):
+                if isinstance(obj, dict):
+                    # founder(s)
+                    if "founder" in obj:
+                        v = obj["founder"]
+                        if isinstance(v, dict) and "name" in v:
+                            names.append(v["name"])
+                        elif isinstance(v, list):
+                            for it in v:
+                                if isinstance(it, dict) and "name" in it:
+                                    names.append(it["name"])
+                    if "founders" in obj and isinstance(obj["founders"], list):
+                        for it in obj["founders"]:
+                            if isinstance(it, dict) and "name" in it:
+                                names.append(it["name"])
+                    # employee with jobTitle CEO/Managing Director
+                    emp = obj.get("employee") or obj.get("employees")
+                    emp = emp if isinstance(emp, list) else [emp] if emp else []
+                    for e in emp:
+                        if isinstance(e, dict):
+                            jt = (e.get("jobTitle") or "").lower()
+                            if re.search(r"\b(ceo|managing director|geschäftsführer)\b", jt) and "name" in e:
+                                names.append(e["name"])
+                    for v in obj.values():
+                        collect(v)
+                elif isinstance(obj, list):
+                    for v in obj:
+                        collect(v)
+            collect(data)
+        return [n for n in names if isinstance(n, str) and 2 < len(n) < 60]
+
+    for url in uniq_candidates:
+        html = fetch(url)
+        if not html:
+            continue
+        try:
+            from bs4 import BeautifulSoup
+            soup = BeautifulSoup(html, "html.parser")
+            # Remove scripts/styles
+            for t in soup(["script", "style", "noscript"]):
+                t.decompose()
+
+            # 3) Try JSON-LD first
+            jl = jsonld_names(soup)
+            if jl:
+                return ", ".join(sorted(set(jl)))
+
+            # 4) Text scan with patterns
+            text = soup.get_text("\n")
+            text_l = text.lower()
+
+            # Direct label-based capture
+            m = capture_after_label.search(text_l)
+            if m:
+                names = clean_names(m.group(1))
+                if names:
+                    return ", ".join(names)
+
+            # 5) Fallback: search lines near labels
+            lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+            for i, ln in enumerate(lines):
+                low = ln.lower()
+                if any(lbl in low for lbl in ["geschäftsführer", "geschäftsführung", "managing director", "ceo", "vorstand", "vertretungs"]):
+                    # Look current and next two lines
+                    neighborhood = " ".join(lines[i:i+3])
+                    names = clean_names(neighborhood)
+                    if names:
+                        return ", ".join(names)
+        except Exception:
+            continue
+
+    return "CEO not found"
 
 def is_valid_link(link, base_url):
+    # Skip problematic URLs
+    if any(skip in link.lower() for skip in [
+        '/cdn-cgi/',  # Cloudflare email protection
+        'mailto:',    # Email links
+        'tel:',       # Phone links
+        'javascript:', # JavaScript
+        '#',          # Anchors
+        'data:',      # Data URLs
+        'blob:',      # Blob URLs
+        '/wp-admin/', # WordPress admin
+        '/wp-content/', # WordPress content
+        '/wp-includes/', # WordPress includes
+        '/api/',      # API endpoints
+        '/admin/',    # Admin areas
+        '/login',     # Login pages
+        '/logout',    # Logout pages
+        '/search',    # Search pages
+        '/feed',      # RSS feeds
+        '/rss',       # RSS feeds
+        '/sitemap',   # Sitemaps
+        '/robots.txt', # Robots file
+        '/favicon',   # Favicons
+        '/apple-touch-icon', # Apple icons
+        '/manifest.json', # Web app manifests
+        '/sw.js',     # Service workers
+        '/_next/',    # Next.js
+        '/static/',   # Static files
+        '/assets/',   # Assets
+        '/images/',   # Images
+        '/img/',      # Images
+        '/css/',      # CSS files
+        '/js/',       # JavaScript files
+        '/fonts/',    # Font files
+        '/uploads/',  # Uploads
+        '/cache/',    # Cache
+        '/tmp/',      # Temporary files
+    ]):
+        return False
+    
+    # Must be a valid relative or absolute URL
     return (link.startswith("/") or 
-            link.startswith(base_url) and 
-            not link.startswith("//") and
-            not link.endswith(('.css', '.js', '.png', '.jpg', '.gif', '.ico')))
+            link.startswith(base_url)) and \
+            not link.startswith("//") and \
+            not link.endswith(('.css', '.js', '.png', '.jpg', '.jpeg', '.gif', '.ico', '.svg', '.webp', '.woff', '.woff2', '.ttf', '.eot', '.pdf', '.zip', '.rar', '.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx'))
 
 def build_url(element, base_url):
     if element.startswith("https:"):

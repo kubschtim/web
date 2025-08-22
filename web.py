@@ -131,12 +131,13 @@ def count_words_on_page(url, search_words):
                 results[word] = words.count(word.lower())
             return results
         except Timeout:
-            print(f"⚠️  Timeout accessing {url}, attempt {attempt + 1}/{MAX_RETRIES}")
             if attempt == MAX_RETRIES - 1:
                 return {word: 0 for word in search_words}
             time.sleep(1)  # Wait before retry
         except RequestException as e:
-            print(f"⚠️  Error accessing {url}: {str(e)}")
+            # Only show errors for non-404 responses to reduce noise
+            if "404" not in str(e):
+                print(f"⚠️  Error accessing {url}: {str(e)}")
             return {word: 0 for word in search_words}
 
 def extract_ceo_from_impressum(base_url):
@@ -657,12 +658,14 @@ results = []
 total_counts = {word: 0 for word in SEARCH_WORDS}
 
 with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
-    # Collect all URL's
+    # Collect all valid URL's
     urls_to_check = []
     for element in liste:
         full_url = build_url(element, BASE_URL)
-        if full_url:
+        if full_url and is_valid_link(full_url, BASE_URL):
             urls_to_check.append(full_url)
+    
+    print(f"🔍 Found {len(urls_to_check)} valid URLs to analyze")
     
     # Run parallel
     word_counts = list(executor.map(lambda url: count_words_on_page(url, SEARCH_WORDS), urls_to_check))
